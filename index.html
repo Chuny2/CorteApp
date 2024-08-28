@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>El Corte APP</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <header class="app-header">
+            <h1 class="app-title">El Corte APP</h1>
+        </header>
+        <main class="app-content">
+            <section class="control-panel">
+                <div class="control-group">
+                    <div class="control-item">
+                        <span>Usar Proxies <span class="info-icon">i</span></span>
+                        <label class="switch">
+                            <input type="checkbox" id="use-proxies">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="control-item">
+                        <span>Reintentar en caso de error</span>
+                        <label class="switch">
+                            <input type="checkbox" id="retry-on-fail">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="control-item">
+                        <span>Modo sin navegador</span>
+                        <label class="switch">
+                            <input type="checkbox" id="headless-mode">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="control-item">
+                        <span>Modo Humanizado</span>
+                        <label class="switch">
+                            <input type="checkbox" id="humanized-mode">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="control-item">
+                        <span>Número de hilos (workers)</span>
+                        <input type="number" id="num-workers" class="input-number" value="1" min="1" max="10">
+                    </div>
+                </div>
+                <div class="button-group">
+                    <button id="start-button" class="button">Iniciar</button>
+                    <button id="pause-button" class="button" disabled>Pausar</button>
+                    <button id="stop-button" class="button" disabled>Detener</button>
+                </div>
+                <button id="select-credentials" class="file-select">Seleccionar Archivo de Credenciales</button>
+                <span id="credentials-path">No se seleccionó ningún archivo de credenciales.</span>
+                <button id="select-proxies" class="file-select">Seleccionar Archivo de Proxies</button>
+                <span id="proxies-path">No se seleccionó ningún archivo de proxies.</span>
+            </section>
+            <section class="stats-panel">
+                <h2>Estadísticas</h2>
+                <div class="stats-item">
+                    <div class="stats-label">
+                        <span>Hits</span>
+                        <span id="hits">0</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div id="hitProgress" class="progress" style="width: 0%"></div>
+                    </div>
+                </div>
+                <div class="stats-item">
+                    <div class="stats-label">
+                        <span>Bans</span>
+                        <span id="bans">0</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div id="banProgress" class="progress" style="width: 0%"></div>
+                    </div>
+                </div>
+                <div class="stats-item">
+                    <div class="stats-label">
+                        <span>Invalids</span>
+                        <span id="invalids">0</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div id="invalidProgress" class="progress" style="width: 0%"></div>
+                    </div>
+                </div>
+            </section>
+            <section class="logs">
+                <h2>Logs</h2>
+                <div id="log-container" class="log-entries"></div>
+            </section>
+        </main>
+    </div>
+
+    <script src="renderer.js" defer></script>
+</body>
+</html>
